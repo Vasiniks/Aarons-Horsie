@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<!--
+  low-poly-horse-grassland.html — realistic-ish procedural horse cantering a
+  grassland circuit, seamless stride loop
+  ─────────────────────────────────────────────────────────────────────────
+  Self-contained. No build step. Open directly in a browser (needs internet:
+  `three` loads from the esm.sh CDN via the importmap).
+
+  Horse: primitives only (tapered cylinders, scaled spheres, boxes, cones),
+  flat-shaded. 3-joint legs (shoulder/gaskin > knee/hock > fetlock/pastern),
+  2-piece neck, flexing spine (chest <> pelvis counter-pitch).
+  Gait: stride phase s is periodic — every joint is a sine stack of s, so the
+  stride tiles seamlessly. Forward speed and stride frequency stay coupled
+  (freq = speed / strideLength) to limit foot-slide.
+  World: value-noise terrain with dirt track ring, 4500 wind-blown instanced
+  grass tufts, flowers, pines, rocks, hills, drifting clouds, circling birds.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>grassland canter · procedural horse</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #9ecfee; overflow: hidden; font-family: ui-monospace, SFMono-Regular, Menlo, monospace }
+    main { position: fixed; inset: 0 }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none }
+    aside {
+      position: fixed; top: 12px; left: 12px; max-width: 310px; padding: 10px 14px;
+      color: #e8f2e4; background: rgba(12, 24, 16, 0.62); border: 1px solid #3a5a40;
+      border-radius: 8px; font-size: 12px; line-height: 1.65;
+    }
+    aside b { color: #ffe08a }
+    aside .row { display: flex; align-items: center; gap: 8px; margin-top: 6px }
+    aside input[type="range"] { width: 120px; accent-color: #ffe08a }
+    aside button {
+      font: inherit; font-size: 11px; color: #10240f; background: #ffe08a;
+      border: 0; border-radius: 5px; padding: 3px 10px; cursor: pointer;
+    }
+    aside button[aria-pressed="true"] { background: #9adcff }
+    #phasebar { height: 4px; background: #24351f; border-radius: 2px; margin-top: 8px; overflow: hidden }
+    #phasefill { height: 100%; width: 0%; background: #ffe08a }
+  </style>
+</head>
+<body>
+  <main>
+    <canvas id="scene"></canvas>
+    <aside>
+      <div><b>grassland canter</b> · seamless stride loop</div>
+      <div>drag to orbit · wheel / pinch to zoom</div>
+      <div>fps <b id="fps">–</b> · draw calls <b id="calls">–</b> · gait <b id="gait">canter</b></div>
+      <div class="row">
+        <label for="speed">speed</label>
+        <input id="speed" type="range" min="2" max="8" step="0.1" value="4.4" />
+        <span id="speedval">4.4 m/s</span>
+      </div>
+      <div class="row">
+        <button id="pause" aria-pressed="false">pause</button>
+        <button id="follow" aria-pressed="true">follow: on</button>
+      </div>
+      <div id="phasebar"><div id="phasefill"></div></div>
+    </aside>
+  </main>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://esm.sh/three@0.184.0",
+      "three/addons/": "https://esm.sh/three@0.184.0/addons/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three'
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
+
+    // ── renderer / loop / gestures (skill scaffold) ────────────────────
+    function createRenderer ({ canvas, pixelRatioMax = 2 } = {}) {
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', stencil: false })
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatioMax))
+      renderer.outputColorSpace = THREE.SRGBColorSpace
+      renderer.toneMapping = THREE.ACESFilmicToneMapping
+      renderer.toneMappingExposure = 1.0
+      renderer.shadowMap.enabled = true
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap
+      return renderer
+    }
+    function attachResizeObserver (renderer, camera, canvas) {
+      const ro = new ResizeObserver((entries) => {
+        const { width, height } = entries[0].contentRect
+        renderer.setSize(width, height, false)
+        camera.aspect = width / height
+        camera.updateProjectionMatrix()
+      })
+      ro.observe(canvas.parentElement ?? document.body)
+      return () => ro.disconnect()
+    }
+    function createLoop () {
+      const subs = new Set()
+      const clock = new THREE.Clock()
+      let frame = 0
+      let raf = 0
+      const tick = () => {
+        const delta = Math.min(clock.getDelta(), 0.05)
+        const elapsed = clock.getElapsedTime()
+        frame += 1
+        for (const cb of subs) cb({ delta, elapsed, frame })
+        raf = requestAnimationFrame(tick)
+      }
+      raf = requestAnimationFrame(tick)
+      return { onFrame (cb) { subs.add(cb); return () => subs.delete(cb) }, dispose () { cancelAnimationFrame(raf); subs.clear() } }
+    }
+    function attachPointerGesture (el, callbacks) {
+      const pointers = new Map()
+      let lastPinch = 0
+      el.style.touchAction = 'none'
+      const onDown = (e) => {
+        el.setPointerCapture(e.pointerId)
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+        if (pointers.size === 2) { const [a, b] = [...pointers.values()]; lastPinch = Math.hypot(a.x - b.x, a.y - b.y) }
+      }
+      const onMove = (e) => {
+        const p = pointers.get(e.pointerId)
+        if (!p) return
+        const dx = e.clientX - p.x
+        const dy = e.clientY - p.y
+        p.x = e.clientX; p.y = e.clientY
+        if (pointers.size === 1) callbacks.onDrag?.(dx, dy)
+        else if (pointers.size === 2) {
+          const [a, b] = [...pointers.values()]
+          const dist = Math.hypot(a.x - b.x, a.y - b.y)
+          if (lastPinch > 0) callbacks.onPinch?.(dist / lastPinch)
+          lastPinch = dist
+        }
+      }
+      const onUp = (e) => { pointers.delete(e.pointerId); if (pointers.size < 2) lastPinch = 0 }
+      const onWheel = (e) => { e.preventDefault(); callbacks.onWheel?.(e.deltaY) }
+      el.addEventListener('pointerdown', onDown)
+      el.addEventListener('pointermove', onMove)
+      el.addEventListener('pointerup', onUp)
+      el.addEventListener('pointercancel', onUp)
+      el.addEventListener('wheel', onWheel, { passive: false })
+      return () => {
+        el.removeEventListener('pointerdown', onDown)
+        el.removeEventListener('pointermove', onMove)
+        el.removeEventListener('pointerup', onUp)
+        el.removeEventListener('pointercancel', onUp)
+        el.removeEventListener('wheel', onWheel)
+      }
+    }
+    function disposeScene (root) {
+      root.traverse((obj) => {
+        obj.geometry?.dispose()
+        const mats = Array.isArray(obj.material) ? obj.material : obj.material ? [obj.material] : []
+        for (const m of mats) {
+          for (const k in m) { const v = m[k]; if (v && typeof v === 'object' && 'minFilter' in v) v.dispose?.() }
+          m.dispose()
+        }
+      })
+    }
+
+    // ── seeded rng + value noise (terrain needs both) ─────────────────
+    function mulberry32 (seed) {
+      let a = seed >>> 0
+      return function rng () {
+        a = (a + 0x6D2B79F5) >>> 0
+        let t = a
+        t = Math.imul(t ^ (t >>> 15), t | 1)
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+      }
+    }
+    function hash2 (x, y) {
+      let h = Math.imul(x, 374761393) + Math.imul(y, 668265263)
+      h = Math.imul(h ^ (h >>> 13), 1274126177)
+      return (((h ^ (h >>> 16)) >>> 0) % 10000) / 10000
+    }
+    function vnoise (x, y) {
+      const xi = Math.floor(x), yi = Math.floor(y)
+      const xf = x - xi, yf = y - yi
+      const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf)
+      const a = hash2(xi, yi), b = hash2(xi + 1, yi), c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1)
+      return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v
+    }
+    function fbm (x, y) {
+      return vnoise(x, y) * 0.55 + vnoise(x * 2.13 + 7, y * 2.13 + 3) * 0.28 + vnoise(x * 4.7 + 13, y * 4.7 + 29) * 0.17
+    }
+
+    const TRACK_R = 14          // circuit radius (m)
+    const TRACK_W = 2.6         // dirt half-width
+    function trackDist (x, z) { return Math.abs(Math.hypot(x, z) - TRACK_R) }
+    function groundHeight (x, z) {
+      let h = (fbm(x * 0.045 + 3, z * 0.045 + 9) - 0.5) * 3.2
+      h += (fbm(x * 0.16, z * 0.16) - 0.5) * 0.5
+      const d = trackDist(x, z)
+      const flat = Math.min(1, Math.max(0, (d - TRACK_W) / 4)) // 0 on track → 1 off
+      const ease = flat * flat * (3 - 2 * flat)
+      return h * ease
+    }
+
+    function jitterVertices (geo, amount, seed) {
+      const rng = mulberry32(seed)
+      const pos = geo.attributes.position
+      for (let i = 0; i < pos.count; i++) {
+        pos.setXYZ(i, pos.getX(i) + (rng() - 0.5) * amount, pos.getY(i) + (rng() - 0.5) * amount, pos.getZ(i) + (rng() - 0.5) * amount)
+      }
+      geo.computeVertexNormals()
+      return geo
+    }
+
+    // ── materials ──────────────────────────────────────────────────────
+    function createMats () {
+      const std = (color, roughness = 0.8, extra = {}) =>
+        new THREE.MeshStandardMaterial({ color, flatShading: true, roughness, metalness: 0.02, ...extra })
+      return {
+        coat: std('#7b4b2a', 0.72),
+        coatDark: std('#5f3a20', 0.78),
+        darkPoints: std('#2b1d12', 0.9),
+        muzzle: std('#3a2617', 0.85),
+        mane: std('#20140c', 0.95),
+        hoof: std('#26262e', 0.45, { metalness: 0.3 }),
+        sock: std('#ddd2bd', 0.8),
+        blaze: std('#e8dcc8', 0.8),
+        eye: new THREE.MeshBasicMaterial({ color: '#100c0a' }),
+        trunk: std('#5a4028', 0.95),
+        pine: std('#2e5d33', 0.9),
+        pine2: std('#3a7040', 0.9),
+        rock: std('#8d8d94', 0.95),
+        hill: std('#5d7f52', 1.0),
+        cloud: std('#ffffff', 1.0, { metalness: 0 }),
+        bird: new THREE.MeshBasicMaterial({ color: '#2a2f38' })
+      }
+    }
+
+    // ── horse v2: spine flex + 3-joint legs + 2-piece neck ─────────────
+    // Forward = +X, so fore/aft swing = rotation.z (+ = hoof forward).
+    function createHorse (mats) {
+      const root = new THREE.Group()
+      const spine = new THREE.Group()
+      spine.position.set(0, 1.58, 0)
+      root.add(spine)
+      const chest = new THREE.Group()
+      const pelvis = new THREE.Group()
+      spine.add(chest, pelvis)
+
+      const ball = (rx, ry, rz, mat, seed) => {
+        const g = new THREE.SphereGeometry(1, 7, 5)
+        jitterVertices(g, 0.03, seed)
+        const m = new THREE.Mesh(g, mat)
+        m.scale.set(rx, ry, rz)
+        m.castShadow = true
+        return m
+      }
+      const taper = (rTop, rBot, len, mat, seed, sides = 7) => {
+        const g = new THREE.CylinderGeometry(rTop, rBot, len, sides)
+        jitterVertices(g, 0.018, seed)
+        g.translate(0, len / 2, 0) // base at pivot, grows +Y
+        const m = new THREE.Mesh(g, mat)
+        m.castShadow = true
+        return m
+      }
+
+      // torso masses
+      const barrel = ball(0.62, 0.36, 0.3, mats.coat, 11)
+      barrel.position.set(-0.05, 0.02, 0)
+      spine.add(barrel)
+      const chestMass = ball(0.34, 0.32, 0.26, mats.coat, 12)
+      chestMass.position.set(0.55, 0.0, 0)
+      chest.add(chestMass)
+      const croup = ball(0.36, 0.34, 0.28, mats.coatDark, 13)
+      croup.position.set(-0.6, 0.06, 0)
+      pelvis.add(croup)
+      const belly = ball(0.45, 0.22, 0.22, mats.coatDark, 14)
+      belly.position.set(-0.05, -0.24, 0)
+      spine.add(belly)
+
+      // ── neck (two segments for S-curve) + head ──
+      const neckLow = new THREE.Group()
+      neckLow.position.set(0.72, 0.22, 0)
+      neckLow.rotation.z = 0.85
+      chest.add(neckLow)
+      const neckLowMesh = taper(0.15, 0.22, 0.55, mats.coat, 21)
+      neckLow.add(neckLowMesh)
+      const crest = taper(0.05, 0.09, 0.5, mats.mane, 22, 5)
+      crest.position.set(-0.13, 0.05, 0)
+      crest.rotation.z = 0.12
+      neckLow.add(crest)
+
+      const neckUp = new THREE.Group()
+      neckUp.position.set(0, 0.55, 0)
+      neckUp.rotation.z = -0.35
+      neckLow.add(neckUp)
+      const neckUpMesh = taper(0.11, 0.15, 0.5, mats.coat, 23)
+      neckUp.add(neckUpMesh)
+      for (let i = 0; i < 4; i++) {
+        const tuft = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.14 - i * 0.015, 0.05), mats.mane)
+        tuft.position.set(-0.1, 0.08 + i * 0.12, 0)
+        tuft.rotation.z = 0.45
+        tuft.castShadow = true
+        neckUp.add(tuft)
+      }
+
+      const head = new THREE.Group()
+      head.position.set(0, 0.5, 0)
+      head.rotation.z = -0.62
+      neckUp.add(head)
+      const cranium = new THREE.Mesh(jitterVertices(new THREE.BoxGeometry(0.26, 0.24, 0.2, 2, 1, 1), 0.02, 31), mats.coat)
+      cranium.position.set(0.05, 0.05, 0)
+      cranium.castShadow = true
+      head.add(cranium)
+      const faceGeo = new THREE.CylinderGeometry(0.085, 0.125, 0.42, 6)
+      faceGeo.rotateZ(Math.PI / 2 - 0.18)
+      faceGeo.translate(0.3, -0.03, 0)
+      jitterVertices(faceGeo, 0.012, 32)
+      const face = new THREE.Mesh(faceGeo, mats.coat)
+      face.castShadow = true
+      head.add(face)
+      const muzzle = new THREE.Mesh(jitterVertices(new THREE.BoxGeometry(0.2, 0.17, 0.16), 0.012, 33), mats.muzzle)
+      muzzle.position.set(0.5, -0.1, 0)
+      muzzle.castShadow = true
+      head.add(muzzle)
+      const blaze = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.05, 0.1), mats.blaze)
+      blaze.position.set(0.38, 0.045, 0)
+      blaze.rotation.z = -0.18
+      head.add(blaze)
+      const earGeo = new THREE.ConeGeometry(0.055, 0.17, 4)
+      const earL = new THREE.Mesh(earGeo, mats.coatDark)
+      earL.position.set(-0.07, 0.22, 0.08)
+      const earR = new THREE.Mesh(earGeo, mats.coatDark)
+      earR.position.set(-0.07, 0.22, -0.08)
+      earL.castShadow = earR.castShadow = true
+      head.add(earL, earR)
+      const eyeGeo = new THREE.SphereGeometry(0.032, 6, 5)
+      for (const s of [1, -1]) {
+        const eye = new THREE.Mesh(eyeGeo, mats.eye)
+        eye.position.set(0.14, 0.07, s * 0.105)
+        head.add(eye)
+      }
+
+      // ── tail: dock + 3 flowing segments ──
+      const tail = new THREE.Group()
+      tail.position.set(-0.92, 0.28, 0)
+      tail.rotation.z = -0.7
+      pelvis.add(tail)
+      const dock = taper(0.06, 0.075, 0.3, mats.coatDark, 41, 5)
+      dock.rotation.z = Math.PI // hang down from pivot
+      dock.position.set(0, 0, 0)
+      tail.add(dock)
+      const tailSegs = []
+      let tp = new THREE.Group()
+      tp.position.set(0, -0.3, 0)
+      tail.add(tp)
+      const tailRadii = [[0.06, 0.045], [0.045, 0.03], [0.03, 0.008]]
+      for (let i = 0; i < 3; i++) {
+        const g = new THREE.CylinderGeometry(tailRadii[i][0], tailRadii[i][1], 0.36, 5)
+        g.translate(0, -0.18, 0)
+        const seg = new THREE.Mesh(g, mats.mane)
+        seg.castShadow = true
+        const pivot = i === 0 ? tp : new THREE.Group()
+        if (i > 0) { pivot.position.set(0, -0.36, 0); tailSegs[tailSegs.length - 1].add(pivot) }
+        pivot.add(seg)
+        tailSegs.push(pivot)
+      }
+
+      // ── legs: upper > mid (knee/hock) > pastern+hoof ──
+      function limb (topX, topZ, upper, mid, low, hoofMat) {
+        const top = new THREE.Group()
+        top.position.set(topX, -0.3, topZ)
+        const upperMesh = taper(upper[1], upper[0], upper[2], upper[3], upper[4], 6)
+        upperMesh.rotation.z = Math.PI
+        upperMesh.position.set(0, 0, 0)
+        top.add(upperMesh)
+        const j1 = new THREE.Group()
+        j1.position.set(upper[5], -upper[2], 0)
+        top.add(j1)
+        const midMesh = taper(mid[1], mid[0], mid[2], mid[3], mid[4], 5)
+        midMesh.rotation.z = Math.PI
+        j1.add(midMesh)
+        const j2 = new THREE.Group()
+        j2.position.set(mid[5], -mid[2], 0)
+        j1.add(j2)
+        const pastern = taper(0.035, 0.05, low[0], low[1], low[2], 5)
+        pastern.rotation.z = Math.PI + low[3]
+        j2.add(pastern)
+        const hoof = new THREE.Mesh(jitterVertices(new THREE.BoxGeometry(0.15, 0.11, 0.14), 0.008, low[4]), hoofMat)
+        hoof.position.set(low[5], -low[0] - 0.04, 0)
+        hoof.castShadow = true
+        j2.add(hoof)
+        return { top, j1, j2 }
+      }
+      // [rBottom, rTop, len, mat, seed, jointOffsetX]
+      const mkUpperF = (z) => limb(0.58, z, [0.075, 0.1, 0.5, mats.coat, 51, 0.01], [0.045, 0.06, 0.48, mats.coatDark, 52, 0.01], [0.22, mats.coatDark, 53, 0.32, 54, 0.05], mats.hoof)
+      const mkUpperH = (z) => limb(-0.62, z, [0.09, 0.14, 0.52, mats.coatDark, 55, -0.1], [0.04, 0.055, 0.5, mats.sock, 56, 0.12], [0.22, mats.sock, 57, 0.38, 58, 0.05], z < 0 ? mats.sock : mats.hoof)
+      const legFL = mkUpperF(0.17); chest.add(legFL.top)
+      const legFR = mkUpperF(-0.17); chest.add(legFR.top)
+      const legHL = mkUpperH(0.18); pelvis.add(legHL.top)
+      const legHR = mkUpperH(-0.18); pelvis.add(legHR.top)
+      // hind thigh bulk
+      for (const [leg, z] of [[legHL, 0.18], [legHR, -0.18]]) {
+        const thigh = ball(0.2, 0.28, 0.14, mats.coatDark, z > 0 ? 61 : 62)
+        thigh.position.set(-0.62, -0.28, z)
+        pelvis.add(thigh)
+      }
+
+      return { root, spine, chest, pelvis, neckLow, neckUp, head, earL, earR, tail, tailSegs, legFL, legFR, legHL, legHR }
+    }
+
+    // ── grassland environment ──────────────────────────────────────────
+    function createEnvironment (scene, mats, uTime) {
+      // terrain with vertex colors (grass / dirt track)
+      const SIZE = 130, SEG = 110
+      const tg = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG)
+      tg.rotateX(-Math.PI / 2)
+      const pos = tg.attributes.position
+      const colors = new Float32Array(pos.count * 3)
+      const cGrass1 = new THREE.Color('#5d8f3e'), cGrass2 = new THREE.Color('#79a94b')
+      const cDry = new THREE.Color('#8fa04c'), cDirt = new THREE.Color('#8a6b46')
+      const tmp = new THREE.Color()
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i), z = pos.getZ(i)
+        const h = groundHeight(x, z)
+        pos.setY(i, h)
+        const n = fbm(x * 0.08 + 40, z * 0.08 + 2)
+        tmp.copy(cGrass1).lerp(cGrass2, n)
+        if (fbm(x * 0.03 + 90, z * 0.03 + 50) > 0.62) tmp.lerp(cDry, 0.5)
+        const d = trackDist(x, z)
+        if (d < TRACK_W + 0.7) {
+          const k = 1 - Math.min(1, Math.max(0, (d - TRACK_W + 0.7) / 1.4))
+          tmp.lerp(cDirt, 0.25 + 0.75 * k * k)
+        }
+        // fade to hazy distance
+        const r = Math.hypot(x, z)
+        if (r > 48) tmp.lerp(new THREE.Color('#7d9b6a'), Math.min(1, (r - 48) / 20) * 0.6)
+        colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b
+      }
+      tg.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+      tg.computeVertexNormals()
+      const terrain = new THREE.Mesh(tg, new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1 }))
+      terrain.receiveShadow = true
+      scene.add(terrain)
+
+      // instanced grass tufts with wind sway (GPU, zero per-frame CPU)
+      const GRASS = 4500
+      const bladeGeo = new THREE.ConeGeometry(0.055, 0.55, 4, 1, true)
+      bladeGeo.translate(0, 0.27, 0)
+      const grassMat = new THREE.MeshStandardMaterial({ color: '#ffffff', flatShading: true, roughness: 1 })
+      grassMat.onBeforeCompile = (sh) => {
+        sh.uniforms.uTime = uTime
+        sh.vertexShader = 'uniform float uTime;\n' + sh.vertexShader.replace('#include <begin_vertex>',
+          '#include <begin_vertex>\n{ vec4 ipos = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);\n' +
+          ' float ph = uTime * 2.1 + ipos.x * 0.7 + ipos.z * 0.9;\n' +
+          ' float bend = smoothstep(0.0, 0.55, position.y);\n' +
+          ' transformed.x += sin(ph) * bend * 0.12;\n transformed.z += cos(ph * 0.8) * bend * 0.08; }')
+      }
+      const grass = new THREE.InstancedMesh(bladeGeo, grassMat, GRASS)
+      const dummy = new THREE.Object3D()
+      const rng = mulberry32(7)
+      const g1 = new THREE.Color('#4e7d32'), g2 = new THREE.Color('#86b04e'), gc = new THREE.Color()
+      let placed = 0, guard = 0
+      while (placed < GRASS && guard++ < GRASS * 30) {
+        const x = (rng() - 0.5) * 110, z = (rng() - 0.5) * 110
+        if (Math.hypot(x, z) > 54) continue
+        if (trackDist(x, z) < TRACK_W + 0.4 && rng() > 0.08) continue
+        dummy.position.set(x, groundHeight(x, z) - 0.02, z)
+        dummy.rotation.set((rng() - 0.5) * 0.25, rng() * Math.PI, (rng() - 0.5) * 0.25)
+        dummy.scale.setScalar(0.7 + rng() * 0.9)
+        dummy.updateMatrix()
+        grass.setMatrixAt(placed, dummy.matrix)
+        grass.setColorAt(placed, gc.copy(g1).lerp(g2, rng()))
+        placed++
+      }
+      grass.count = placed
+      grass.instanceMatrix.needsUpdate = true
+      if (grass.instanceColor) grass.instanceColor.needsUpdate = true
+      scene.add(grass)
+
+      // wildflowers (instanced heads)
+      const FLOWERS = 260
+      const fGeo = new THREE.IcosahedronGeometry(0.055, 0)
+      const fMat = new THREE.MeshStandardMaterial({ color: '#ffffff', flatShading: true, roughness: 0.7 })
+      const flowers = new THREE.InstancedMesh(fGeo, fMat, FLOWERS)
+      const palette = ['#ff6b9d', '#ffd93d', '#ffffff', '#c084fc'].map((c) => new THREE.Color(c))
+      placed = 0; guard = 0
+      while (placed < FLOWERS && guard++ < FLOWERS * 40) {
+        const x = (rng() - 0.5) * 100, z = (rng() - 0.5) * 100
+        if (Math.hypot(x, z) > 50) continue
+        if (trackDist(x, z) < TRACK_W + 0.6) continue
+        dummy.position.set(x, groundHeight(x, z) + 0.32, z)
+        dummy.rotation.set(0, 0, 0)
+        dummy.scale.setScalar(0.7 + rng() * 0.8)
+        dummy.updateMatrix()
+        flowers.setMatrixAt(placed, dummy.matrix)
+        flowers.setColorAt(placed, palette[Math.floor(rng() * palette.length)])
+        placed++
+      }
+      flowers.count = placed
+      scene.add(flowers)
+
+      // pines (inside + outside the circuit)
+      const trees = new THREE.Group()
+      for (let i = 0; i < 14; i++) {
+        const a = rng() * Math.PI * 2
+        const r = i < 5 ? 4 + rng() * 6 : 22 + rng() * 26
+        const x = Math.cos(a) * r, z = Math.sin(a) * r
+        if (trackDist(x, z) < TRACK_W + 1.5) continue
+        const t = new THREE.Group()
+        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.2, 1.2, 5), mats.trunk)
+        trunk.position.y = 0.6
+        trunk.castShadow = true
+        t.add(trunk)
+        const tiers = 2 + Math.floor(rng() * 2)
+        for (let k = 0; k < tiers; k++) {
+          const cone = new THREE.Mesh(new THREE.ConeGeometry(1.5 - k * 0.35, 1.3, 6), k % 2 ? mats.pine2 : mats.pine)
+          cone.position.y = 1.5 + k * 0.85
+          cone.castShadow = true
+          t.add(cone)
+        }
+        const s = 0.9 + rng() * 1.1
+        t.scale.setScalar(s)
+        t.position.set(x, groundHeight(x, z), z)
+        t.rotation.y = rng() * Math.PI
+        trees.add(t)
+      }
+      scene.add(trees)
+
+      // rocks
+      for (let i = 0; i < 16; i++) {
+        const a = rng() * Math.PI * 2, r = 6 + rng() * 42
+        const x = Math.cos(a) * r, z = Math.sin(a) * r
+        if (trackDist(x, z) < TRACK_W + 0.8) continue
+        const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.3 + rng() * 0.5, 0), mats.rock)
+        rock.position.set(x, groundHeight(x, z) + 0.1, z)
+        rock.rotation.set(rng() * 3, rng() * 3, rng() * 3)
+        rock.scale.y = 0.6
+        rock.castShadow = rock.receiveShadow = true
+        scene.add(rock)
+      }
+
+      // distant hills
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2 + 0.4
+        const hill = new THREE.Mesh(new THREE.IcosahedronGeometry(14 + (i % 3) * 6, 1), mats.hill)
+        hill.position.set(Math.cos(a) * 78, -4, Math.sin(a) * 78)
+        hill.scale.y = 0.32
+        scene.add(hill)
+      }
+
+      // clouds (drift +X, wrap) — no shadows
+      const clouds = []
+      for (let i = 0; i < 6; i++) {
+        const c = new THREE.Group()
+        const n = 3 + Math.floor(rng() * 2)
+        for (let k = 0; k < n; k++) {
+          const puff = new THREE.Mesh(new THREE.IcosahedronGeometry(1.4 + rng() * 1.4, 0), mats.cloud)
+          puff.position.set(k * 2.1 - n, rng() * 0.8, (rng() - 0.5) * 2)
+          puff.scale.y = 0.55
+          c.add(puff)
+        }
+        c.position.set((rng() - 0.5) * 120, 17 + rng() * 9, (rng() - 0.5) * 110)
+        scene.add(c)
+        clouds.push({ g: c, speed: 0.5 + rng() * 0.5 })
+      }
+
+      // birds: two-triangle flappers circling the meadow
+      const birds = []
+      for (let i = 0; i < 5; i++) {
+        const b = new THREE.Group()
+        const wgeo = new THREE.BoxGeometry(0.5, 0.02, 0.14)
+        wgeo.translate(0.25, 0, 0)
+        const wl = new THREE.Mesh(wgeo, mats.bird)
+        const wr = new THREE.Mesh(wgeo, mats.bird)
+        wr.rotation.y = Math.PI
+        b.add(wl, wr)
+        scene.add(b)
+        birds.push({ g: b, wl, wr, r: 16 + i * 3.5, h: 12 + i * 1.3, a: rng() * 6.28, sp: 0.14 + rng() * 0.08, fl: 6 + rng() * 3 })
+      }
+      return { clouds, birds }
+    }
+
+    // ── sky dome (gradient) + lighting ────────────────────────────────
+    function setupSky (scene) {
+      const skyGeo = new THREE.SphereGeometry(160, 16, 12)
+      const skyMat = new THREE.ShaderMaterial({
+        side: THREE.BackSide, depthWrite: false, fog: false,
+        uniforms: { top: { value: new THREE.Color('#3f8fd1') }, mid: { value: new THREE.Color('#9ed4ef') }, bot: { value: new THREE.Color('#e8f3e2') } },
+        vertexShader: 'varying vec3 vP; void main() { vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+        fragmentShader: 'varying vec3 vP; uniform vec3 top; uniform vec3 mid; uniform vec3 bot;\n' +
+          'void main() { float h = normalize(vP).y; vec3 c = h > 0.12 ? mix(mid, top, smoothstep(0.12, 0.65, h)) : mix(bot, mid, smoothstep(-0.08, 0.12, h));\n' +
+          ' gl_FragColor = vec4(c, 1.0); }'
+      })
+      scene.add(new THREE.Mesh(skyGeo, skyMat))
+      scene.fog = new THREE.Fog('#cfe0d8', 45, 140)
+    }
+    function setupLighting (scene, renderer) {
+      const pmrem = new THREE.PMREMGenerator(renderer)
+      const env = new RoomEnvironment()
+      scene.environment = pmrem.fromScene(env, 0.04).texture
+      scene.environmentIntensity = 0.5
+      pmrem.dispose()
+      env.traverse((o) => o.geometry?.dispose())
+      const sun = new THREE.DirectionalLight('#fff1d8', 2.4)
+      sun.position.set(24, 30, 14)
+      sun.castShadow = true
+      sun.shadow.mapSize.set(2048, 2048)
+      sun.shadow.camera.left = -24; sun.shadow.camera.right = 24
+      sun.shadow.camera.top = 24; sun.shadow.camera.bottom = -24
+      sun.shadow.camera.near = 5; sun.shadow.camera.far = 90
+      sun.shadow.bias = -0.0002
+      sun.shadow.normalBias = 0.03
+      const hemi = new THREE.HemisphereLight('#bcd8ff', '#5a6b3f', 0.55)
+      scene.add(sun, sun.target, hemi)
+    }
+
+    // ── scene content ──────────────────────────────────────────────────
+    function buildContent ({ scene }) {
+      const mats = createMats()
+      const uTime = { value: 0 }
+      setupSky(scene)
+      const env = createEnvironment(scene, mats, uTime)
+      const H = createHorse(mats)
+      scene.add(H.root)
+
+      const STRIDE_LEN = 2.4
+      const OFF = { HL: 0, HR: 0.4, FL: Math.PI * 1.02, FR: Math.PI * 1.02 + 0.4 }
+      const state = { speed: 4.4, paused: false, follow: true, lap: 0, stride: 0 }
+
+      const speedInput = document.querySelector('#speed')
+      const speedVal = document.querySelector('#speedval')
+      const gaitEl = document.querySelector('#gait')
+      const pauseBtn = document.querySelector('#pause')
+      const followBtn = document.querySelector('#follow')
+      const phaseFill = document.querySelector('#phasefill')
+      const gaitName = (v) => v < 2.6 ? 'trot' : v < 5.2 ? 'canter' : 'gallop'
+      speedInput.addEventListener('input', () => {
+        state.speed = parseFloat(speedInput.value)
+        speedVal.textContent = state.speed.toFixed(1) + ' m/s'
+        gaitEl.textContent = gaitName(state.speed)
+      })
+      gaitEl.textContent = gaitName(state.speed)
+      pauseBtn.addEventListener('click', () => {
+        state.paused = !state.paused
+        pauseBtn.setAttribute('aria-pressed', String(state.paused))
+        pauseBtn.textContent = state.paused ? 'resume' : 'pause'
+      })
+      followBtn.addEventListener('click', () => {
+        state.follow = !state.follow
+        followBtn.setAttribute('aria-pressed', String(state.follow))
+        followBtn.textContent = state.follow ? 'follow: on' : 'follow: off'
+      })
+
+      // dust puffs at the hooves
+      const DUST = 22
+      const dust = []
+      for (let i = 0; i < DUST; i++) {
+        const m = new THREE.Mesh(new THREE.IcosahedronGeometry(0.09, 0), new THREE.MeshBasicMaterial({ color: '#b09a72', transparent: true, opacity: 0.3, depthWrite: false }))
+        m.userData.seed = (i / DUST)
+        scene.add(m)
+        dust.push(m)
+      }
+
+      const camTarget = new THREE.Vector3(TRACK_R, 1.6, 0)
+      const horsePos = new THREE.Vector3()
+      const horseTan = new THREE.Vector3()
+
+      function poseLeg (leg, p, swing, foldMid, hind) {
+        const s = Math.sin(p)
+        const lift = Math.pow(Math.max(0, Math.sin(p - 1.0)), 1.25)
+        leg.top.rotation.z = s * swing + (hind ? -0.06 : 0.02)
+        leg.j1.rotation.z = (hind ? 1 : -1) * lift * foldMid - (hind ? 0.12 : 0.06)
+        leg.j2.rotation.z = (hind ? -1 : 1) * lift * foldMid * 0.6 + (hind ? 0.3 : -0.18)
+      }
+
+      function tick ({ delta, elapsed }) {
+        uTime.value = elapsed
+        if (!state.paused) {
+          const freq = state.speed / STRIDE_LEN
+          state.stride += delta * freq * Math.PI * 2
+          state.lap += delta * (state.speed / TRACK_R)
+        }
+        const s = state.stride
+        const a = state.lap
+        const amp = Math.min(1, 0.45 + state.speed / 6) // gait energy scales with speed
+
+        // circuit position + tangent heading (rotation.y = -a - π/2)
+        horsePos.set(Math.cos(a) * TRACK_R, 0, Math.sin(a) * TRACK_R)
+        horseTan.set(-Math.sin(a), 0, Math.cos(a))
+        H.root.position.set(horsePos.x, 0.02, horsePos.z)
+        H.root.rotation.y = -a - Math.PI / 2
+
+        // legs — hind pair then front pair (rotary gallop timing)
+        poseLeg(H.legHL, s + OFF.HL, 0.62 * amp, 0.85 * amp, true)
+        poseLeg(H.legHR, s + OFF.HR, 0.62 * amp, 0.85 * amp, true)
+        poseLeg(H.legFL, s + OFF.FL, 0.58 * amp, 1.05 * amp, false)
+        poseLeg(H.legFR, s + OFF.FR, 0.58 * amp, 1.05 * amp, false)
+        H.legFL.top.rotation.x = Math.sin(s + 0.5) * 0.04
+        H.legFR.top.rotation.x = -Math.sin(s + 0.5) * 0.04
+
+        // spine: suspension bob (2nd harmonic) + gather/extend rock
+        const bob = Math.sin(s * 2 + 0.7) * 0.055 * amp + Math.sin(s + 2.1) * 0.02
+        H.spine.position.y = 1.58 + bob
+        H.spine.rotation.z = Math.sin(s + 1.15) * 0.05 * amp
+        H.chest.rotation.z = Math.sin(s + 1.15) * 0.045 * amp
+        H.pelvis.rotation.z = Math.sin(s + 1.15 + Math.PI) * 0.05 * amp
+        H.root.rotation.z = Math.sin(s * 2 + 0.4) * 0.008
+
+        // neck (lags body) + head nod + ear flicks (3s harmonic keeps loop seamless)
+        H.neckLow.rotation.z = 0.85 + Math.sin(s + 2.3) * 0.09 * amp
+        H.neckLow.rotation.y = Math.sin(s + 1.4) * 0.03
+        H.neckUp.rotation.z = -0.35 + Math.sin(s * 2 + 0.9) * 0.035 * amp
+        H.head.rotation.z = -0.62 + Math.sin(s + 0.6) * 0.11 * amp
+        H.head.rotation.y = Math.sin(s * 2 + 0.2) * 0.04
+        const flick = Math.max(0, Math.sin(s * 3 + 1.7)) ** 8
+        H.earL.rotation.x = -flick * 0.5
+        H.earR.rotation.z = -flick * 0.3
+
+        // tail streams back, travelling wave down segments
+        H.tail.rotation.z = -0.7 - amp * 0.35 + Math.sin(s * 2 + 2.6) * 0.14
+        H.tail.rotation.y = Math.sin(s + 1.0) * 0.2
+        for (let i = 0; i < H.tailSegs.length; i++) {
+          H.tailSegs[i].rotation.z = -0.1 + Math.sin(s * 2 - i * 0.9 + 2.4) * 0.2
+          H.tailSegs[i].rotation.y = Math.sin(s - i * 0.8 + 1.2) * 0.24
+        }
+
+        // dust: recycle by fract age, trail behind along -tangent
+        for (const m of dust) {
+          const life = 1.1
+          const age = (((state.paused ? 0 : elapsed) * 0 + state.stride / (Math.PI * 2) * 0.55 + m.userData.seed * 7) % 1 + 1) % 1
+          const back = 0.6 + age * 3.2
+          m.position.set(
+            horsePos.x - horseTan.x * back + Math.sin((age + m.userData.seed) * 9) * 0.3,
+            0.12 + age * 0.7,
+            horsePos.z - horseTan.z * back + Math.cos((age + m.userData.seed) * 7) * 0.3
+          )
+          m.scale.setScalar(0.5 + age * 2.0)
+          m.material.opacity = 0.28 * (1 - age) * amp
+        }
+
+        // clouds drift +X with wrap; birds circle + flap
+        for (const c of env.clouds) {
+          c.g.position.x += c.speed * delta * (state.paused ? 0 : 1)
+          if (c.g.position.x > 70) c.g.position.x = -70
+        }
+        for (const b of env.birds) {
+          b.a += b.sp * delta * (state.paused ? 0 : 1)
+          b.g.position.set(Math.cos(b.a) * b.r, b.h + Math.sin(elapsed * 0.7 + b.r) * 0.8, Math.sin(b.a) * b.r)
+          b.g.rotation.y = -b.a
+          const flap = Math.sin(elapsed * b.fl + b.r) * 0.55
+          b.wl.rotation.z = flap
+          b.wr.rotation.z = flap
+        }
+
+        // follow camera target tracks the horse
+        if (state.follow) {
+          camTarget.lerp(new THREE.Vector3(horsePos.x, 1.6, horsePos.z), 1 - Math.exp(-delta * 3))
+        }
+        phaseFill.style.width = ((((s / (Math.PI * 2)) % 1) + 1) % 1 * 100).toFixed(1) + '%'
+        return camTarget
+      }
+      return { tick, getTarget: () => camTarget }
+    }
+
+    // ── wiring ─────────────────────────────────────────────────────────
+    const canvas = document.querySelector('#scene')
+    const renderer = createRenderer({ canvas })
+    const scene = new THREE.Scene()
+    setupLighting(scene, renderer)
+
+    const camera = new THREE.PerspectiveCamera(50, canvas.clientWidth / canvas.clientHeight, 0.1, 400)
+    camera.position.set(TRACK_R + 5.5, 3.2, 6.5)
+    let theta = 0.6, phi = 0.32, radius = 8.5
+    const followPos = new THREE.Vector3(TRACK_R, 1.6, 0)
+    const updateCamera = (target) => {
+      const r = radius * Math.cos(phi)
+      camera.position.set(target.x + Math.sin(theta) * r, target.y + Math.sin(phi) * radius, target.z + Math.cos(theta) * r)
+      camera.lookAt(target.x, target.y + 0.2, target.z)
+    }
+
+    attachResizeObserver(renderer, camera, canvas)
+    attachPointerGesture(canvas, {
+      onDrag (dx, dy) {
+        theta -= dx * 0.005
+        phi = Math.max(-0.5, Math.min(1.35, phi + dy * 0.005))
+      },
+      onPinch (s) { radius = Math.max(3, Math.min(40, radius / s)) },
+      onWheel (d) { radius = Math.max(3, Math.min(40, radius * (1 + d * 0.001))) }
+    })
+
+    const content = buildContent({ scene, camera, renderer })
+    renderer.compile(scene, camera)
+
+    const loop = createLoop()
+    const fpsEl = document.querySelector('#fps')
+    const callsEl = document.querySelector('#calls')
+    let acc = 0, frames = 0
+    loop.onFrame((ctx) => {
+      const target = content.tick(ctx) ?? followPos
+      followPos.copy(target)
+      updateCamera(followPos)
+      renderer.render(scene, camera)
+      acc += ctx.delta; frames += 1
+      if (acc >= 0.5) {
+        fpsEl.textContent = Math.round(frames / acc)
+        callsEl.textContent = renderer.info.render.calls
+        acc = 0; frames = 0
+      }
+    })
+
+    window.__disposeScene = () => { loop.dispose(); disposeScene(scene); renderer.dispose() }
+    window.__SCENE_READY__ = true
+    // perf: medium. ~90 draw calls, terrain 24k tris + grass 1 call (~36k tris)
+    // + horse ~60 meshes. Wind is GPU shader, zero per-frame CPU for grass.
+  </script>
+</body>
+</html>
