@@ -24,6 +24,10 @@
     html, body { margin: 0; height: 100%; background: #9ecfee; overflow: hidden; font-family: ui-monospace, SFMono-Regular, Menlo, monospace }
     main { position: fixed; inset: 0 }
     canvas { display: block; width: 100%; height: 100%; touch-action: none }
+    main::after {
+      content: ''; position: fixed; inset: 0; pointer-events: none;
+      background: radial-gradient(ellipse at center, transparent 58%, rgba(8, 18, 12, 0.32) 100%);
+    }
     aside {
       position: fixed; top: 12px; left: 12px; max-width: 310px; padding: 10px 14px;
       color: #e8f2e4; background: rgba(12, 24, 16, 0.62); border: 1px solid #3a5a40;
@@ -82,7 +86,7 @@
       renderer.toneMapping = THREE.ACESFilmicToneMapping
       renderer.toneMappingExposure = 1.06
       renderer.shadowMap.enabled = true
-      renderer.shadowMap.type = THREE.PCFSoftShadowMap
+      renderer.shadowMap.type = THREE.PCFShadowMap
       return renderer
     }
     function attachResizeObserver (renderer, camera, canvas) {
@@ -279,9 +283,9 @@
       neckLow.position.set(0.72, 0.22, 0)
       neckLow.rotation.z = -1.25
       chest.add(neckLow)
-      const neckLowMesh = taper(0.15, 0.22, 0.55, mats.coat, 21)
+      const neckLowMesh = taper(0.13, 0.2, 0.55, mats.coat, 21)
       neckLow.add(neckLowMesh)
-      const crest = taper(0.05, 0.09, 0.5, mats.mane, 22, 5)
+      const crest = taper(0.035, 0.06, 0.5, mats.mane, 22, 5)
       crest.position.set(-0.13, 0.05, 0)
       crest.rotation.z = 0.12
       neckLow.add(crest)
@@ -293,9 +297,9 @@
       const neckUpMesh = taper(0.11, 0.15, 0.5, mats.coat, 23)
       neckUp.add(neckUpMesh)
       for (let i = 0; i < 4; i++) {
-        const tuft = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.14 - i * 0.015, 0.05), mats.mane)
-        tuft.position.set(-0.1, 0.08 + i * 0.12, 0)
-        tuft.rotation.z = 0.45
+        const tuft = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.12 - i * 0.012, 0.045), mats.mane)
+        tuft.position.set(-0.11, 0.06 + i * 0.13, 0)
+        tuft.rotation.z = 0.9
         tuft.castShadow = true
         neckUp.add(tuft)
       }
@@ -319,8 +323,13 @@
       muzzle.position.set(0.5, -0.1, 0)
       muzzle.castShadow = true
       head.add(muzzle)
-      const blaze = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.05, 0.1), mats.blaze)
-      blaze.position.set(0.38, 0.045, 0)
+      for (const nz of [1, -1]) {
+        const nostril = new THREE.Mesh(new THREE.SphereGeometry(0.022, 6, 5), mats.eye)
+        nostril.position.set(0.6, -0.12, nz * 0.055)
+        head.add(nostril)
+      }
+      const blaze = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.045, 0.07), mats.blaze)
+      blaze.position.set(0.38, 0.03, 0)
       blaze.rotation.z = -0.18
       head.add(blaze)
       const earGeo = new THREE.ConeGeometry(0.055, 0.17, 4)
@@ -330,6 +339,11 @@
       earR.position.set(-0.07, 0.22, -0.08)
       earL.castShadow = earR.castShadow = true
       head.add(earL, earR)
+      const forelock = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.12, 0.1), mats.mane)
+      forelock.position.set(-0.03, 0.2, 0)
+      forelock.rotation.z = 0.55
+      forelock.castShadow = true
+      head.add(forelock)
       const eyeGeo = new THREE.SphereGeometry(0.032, 6, 5)
       for (const s of [1, -1]) {
         const eye = new THREE.Mesh(eyeGeo, mats.eye)
@@ -376,6 +390,10 @@
         const midMesh = taper(mid[1], mid[0], mid[2], mid[3], mid[4], 5)
         midMesh.rotation.z = Math.PI
         j1.add(midMesh)
+        const knob = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 5), mid[3])
+        knob.position.copy(j1.position)
+        knob.castShadow = true
+        top.add(knob)
         const j2 = new THREE.Group()
         j2.position.set(mid[5], -mid[2], 0)
         j1.add(j2)
@@ -415,6 +433,7 @@
       const colors = new Float32Array(pos.count * 3)
       const cGrass1 = new THREE.Color('#5d8f3e'), cGrass2 = new THREE.Color('#79a94b')
       const cDry = new THREE.Color('#8fa04c'), cDirt = new THREE.Color('#8a6b46')
+      const cDirtDark = new THREE.Color('#5f4a30')
       const tmp = new THREE.Color()
       for (let i = 0; i < pos.count; i++) {
         const x = pos.getX(i), z = pos.getZ(i)
@@ -428,6 +447,8 @@
           const k = 1 - Math.min(1, Math.max(0, (d - TRACK_W + 0.7) / 1.4))
           tmp.lerp(cDirt, 0.25 + 0.75 * k * k)
         }
+        // worn darker racing line down the middle of the track
+        if (d < 1.0) tmp.lerp(cDirtDark, (1 - d) * 0.5)
         // fade to hazy distance
         const r = Math.hypot(x, z)
         if (r > 48) tmp.lerp(new THREE.Color('#7d9b6a'), Math.min(1, (r - 48) / 20) * 0.6)
@@ -575,6 +596,23 @@
         rock.castShadow = rock.receiveShadow = true
         scene.add(rock)
       }
+
+      // distant tree line on the horizon (instanced, 1 draw call)
+      const FAR = 44
+      const farTrees = new THREE.InstancedMesh(new THREE.ConeGeometry(1.8, 4.6, 5), new THREE.MeshStandardMaterial({ color: '#33582f', flatShading: true, roughness: 1 }), FAR)
+      farTrees.geometry.translate(0, 2.1, 0)
+      for (let i = 0; i < FAR; i++) {
+        const a = (i / FAR) * Math.PI * 2 + hash2(i, 7) * 0.12
+        const r = 55 + hash2(i, 13) * 7
+        const x = Math.cos(a) * r, z = Math.sin(a) * r
+        dummy.position.set(x, groundHeight(x, z) - 0.2, z)
+        dummy.rotation.set(0, hash2(i, 21) * 3, 0)
+        const fs = 0.9 + hash2(i, 31) * 1.2
+        dummy.scale.set(fs, fs * (0.9 + hash2(i, 41) * 0.6), fs)
+        dummy.updateMatrix()
+        farTrees.setMatrixAt(i, dummy.matrix)
+      }
+      scene.add(farTrees)
 
       // distant hills
       for (let i = 0; i < 5; i++) {
@@ -735,7 +773,10 @@
       scene.add(H.root)
 
       const STRIDE_LEN = 2.4
-      const OFF = { HL: 0, HR: 0.4, FL: Math.PI * 1.02, FR: Math.PI * 1.02 + 0.4 }
+      // Transverse gallop footfall: four SEPARATE beats — non-lead hind,
+      // lead hind, non-lead front, lead front — then a suspension gap with
+      // all feet off the ground. Fractions of stride: 0, 0.15, 0.45, 0.60.
+      const OFF = { HR: 0, HL: 0.95, FR: 2.83, FL: 3.77 }
       const state = { speed: 4.4, paused: false, follow: true, lap: 0, stride: 0 }
 
       const speedInput = document.querySelector('#speed')
@@ -777,7 +818,7 @@
       const horseTan = new THREE.Vector3()
 
       const TAU = Math.PI * 2
-      const DUTY = 0.42 // stance fraction of the stride: hoof on ground
+      const DUTY = 0.32 // stance fraction per leg: four beats + suspension gap
       function sstep (a, b, x) {
         const k = Math.min(1, Math.max(0, (x - a) / (b - a)))
         return k * k * (3 - 2 * k)
@@ -869,7 +910,7 @@
             horsePos.z - horseTan.z * back + Math.cos((age + m.userData.seed) * 7) * 0.3
           )
           m.scale.setScalar(0.5 + age * 2.0)
-          m.material.opacity = 0.28 * (1 - age) * amp
+          m.material.opacity = 0.2 * (1 - age) * amp
         }
 
         // clouds drift +X with wrap; birds circle + flap
