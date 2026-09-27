@@ -272,6 +272,11 @@
       const chestMass = ball(0.34, 0.32, 0.26, mats.coat, 12)
       chestMass.position.set(0.55, 0.0, 0)
       chest.add(chestMass)
+      for (const sz of [1, -1]) {
+        const shoulder = ball(0.2, 0.26, 0.12, mats.coat, sz > 0 ? 16 : 17)
+        shoulder.position.set(0.5, -0.12, sz * 0.2)
+        chest.add(shoulder)
+      }
       const croup = ball(0.36, 0.34, 0.28, mats.coatDark, 13)
       croup.position.set(-0.6, 0.06, 0)
       pelvis.add(croup)
@@ -281,11 +286,22 @@
 
       // ── neck (two segments for S-curve) + head ──
       const neckLow = new THREE.Group()
-      neckLow.position.set(0.72, 0.22, 0)
-      neckLow.rotation.z = -1.25
+      neckLow.position.set(0.66, 0.27, 0)
+      neckLow.rotation.z = -1.3
       chest.add(neckLow)
-      const neckLowMesh = taper(0.14, 0.22, 0.42, mats.coat, 21)
+      const neckLowMesh = taper(0.15, 0.26, 0.42, mats.coat, 21)
       neckLow.add(neckLowMesh)
+      // muscular neck base flowing into the shoulder
+      const neckBase = taper(0.2, 0.28, 0.3, mats.coat, 25, 6)
+      neckBase.rotation.z = Math.PI + 0.5
+      neckBase.position.set(-0.03, 0.02, 0)
+      neckBase.castShadow = true
+      neckLow.add(neckBase)
+      const neckRoot = new THREE.Mesh(jitterVertices(new THREE.SphereGeometry(1, 7, 5), 0.03, 26), mats.coat)
+      neckRoot.scale.set(0.3, 0.3, 0.24)
+      neckRoot.position.set(-0.12, -0.05, 0)
+      neckRoot.castShadow = true
+      neckLow.add(neckRoot)
       const crest = taper(0.035, 0.06, 0.38, mats.mane, 22, 5)
       crest.position.set(-0.12, 0.03, 0)
       crest.rotation.z = 0.12
@@ -299,7 +315,7 @@
 
       const neckUp = new THREE.Group()
       neckUp.position.set(0, 0.42, 0)
-      neckUp.rotation.z = 0.15
+      neckUp.rotation.z = -0.12
       neckLow.add(neckUp)
       const neckUpMesh = taper(0.115, 0.15, 0.36, mats.coat, 23)
       neckUp.add(neckUpMesh)
@@ -315,28 +331,28 @@
       head.position.set(0, 0.36, 0)
       head.rotation.z = 0.92
       neckUp.add(head)
-      const cranium = new THREE.Mesh(jitterVertices(new THREE.BoxGeometry(0.26, 0.24, 0.2, 2, 1, 1), 0.02, 31), mats.coat)
-      cranium.position.set(0.05, 0.05, 0)
+      const cranium = new THREE.Mesh(jitterVertices(new THREE.BoxGeometry(0.3, 0.26, 0.22, 2, 1, 1), 0.02, 31), mats.coat)
+      cranium.position.set(0.06, 0.05, 0)
       cranium.castShadow = true
       head.add(cranium)
-      const faceGeo = new THREE.CylinderGeometry(0.085, 0.125, 0.42, 6)
+      const faceGeo = new THREE.CylinderGeometry(0.085, 0.125, 0.46, 6)
       faceGeo.rotateZ(Math.PI / 2 - 0.18)
-      faceGeo.translate(0.3, -0.03, 0)
+      faceGeo.translate(0.32, -0.03, 0)
       jitterVertices(faceGeo, 0.012, 32)
       const face = new THREE.Mesh(faceGeo, mats.coat)
       face.castShadow = true
       head.add(face)
-      const muzzle = new THREE.Mesh(jitterVertices(new THREE.BoxGeometry(0.2, 0.17, 0.16), 0.012, 33), mats.muzzle)
-      muzzle.position.set(0.5, -0.1, 0)
+      const muzzle = new THREE.Mesh(jitterVertices(new THREE.BoxGeometry(0.22, 0.18, 0.17), 0.012, 33), mats.muzzle)
+      muzzle.position.set(0.54, -0.1, 0)
       muzzle.castShadow = true
       head.add(muzzle)
       for (const nz of [1, -1]) {
         const nostril = new THREE.Mesh(new THREE.SphereGeometry(0.022, 6, 5), mats.eye)
-        nostril.position.set(0.6, -0.12, nz * 0.055)
+        nostril.position.set(0.64, -0.12, nz * 0.06)
         head.add(nostril)
       }
-      const blaze = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.045, 0.07), mats.blaze)
-      blaze.position.set(0.38, 0.03, 0)
+      const blaze = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.045, 0.07), mats.blaze)
+      blaze.position.set(0.4, 0.035, 0)
       blaze.rotation.z = -0.18
       head.add(blaze)
       const earGeo = new THREE.ConeGeometry(0.055, 0.17, 4)
@@ -354,7 +370,7 @@
       const eyeGeo = new THREE.SphereGeometry(0.032, 6, 5)
       for (const s of [1, -1]) {
         const eye = new THREE.Mesh(eyeGeo, mats.eye)
-        eye.position.set(0.14, 0.07, s * 0.105)
+        eye.position.set(0.15, 0.075, s * 0.11)
         head.add(eye)
       }
 
@@ -414,8 +430,8 @@
         return { top, j1, j2 }
       }
       // [rBottom, rTop, len, mat, seed, jointOffsetX]
-      const mkUpperF = (z) => limb(0.58, z, [0.075, 0.1, 0.5, mats.coat, 51, 0.01], [0.045, 0.06, 0.48, mats.coatDark, 52, 0.01], [0.22, mats.coatDark, 53, 0.32, 54, 0.05], mats.hoof)
-      const mkUpperH = (z) => limb(-0.62, z, [0.09, 0.14, 0.52, mats.coatDark, 55, -0.1], [0.04, 0.055, 0.5, mats.sock, 56, 0.12], [0.22, mats.sock, 57, 0.38, 58, 0.05], z < 0 ? mats.sock : mats.hoof)
+      const mkUpperF = (z) => limb(0.58, z, [0.085, 0.115, 0.5, mats.coat, 51, 0.01], [0.045, 0.06, 0.48, mats.coatDark, 52, 0.01], [0.22, mats.coatDark, 53, 0.32, 54, 0.05], mats.hoof)
+      const mkUpperH = (z) => limb(-0.62, z, [0.1, 0.155, 0.52, mats.coatDark, 55, -0.1], [0.04, 0.055, 0.5, mats.sock, 56, 0.12], [0.22, mats.sock, 57, 0.38, 58, 0.05], z < 0 ? mats.sock : mats.hoof)
       const legFL = mkUpperF(0.17); chest.add(legFL.top)
       const legFR = mkUpperF(-0.17); chest.add(legFR.top)
       const legHL = mkUpperH(0.18); pelvis.add(legHL.top)
@@ -911,9 +927,9 @@
 
         // neck (lags body) + head nod + ear flicks (3s harmonic keeps loop seamless)
         // head/neck lowest at lead-front touchdown, highest through suspension
-        H.neckLow.rotation.z = -1.571 + Math.sin(s + 0.94) * 0.085 * amp
+        H.neckLow.rotation.z = -1.3 + Math.sin(s + 0.94) * 0.085 * amp
         H.neckLow.rotation.y = Math.sin(s + 1.4) * 0.03
-        H.neckUp.rotation.z = 0.15 + Math.sin(s * 2 + 0.9) * 0.04 * amp
+        H.neckUp.rotation.z = -0.12 + Math.sin(s * 2 + 0.9) * 0.04 * amp
         H.head.rotation.z = 0.92 + Math.sin(s + 0.6) * 0.1 * amp
         H.head.rotation.y = Math.sin(s * 2 + 0.2) * 0.04
         const flick = Math.max(0, Math.sin(s * 3 + 1.7)) ** 8
