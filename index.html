@@ -19,6 +19,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="data:," />
   <title>grassland canter · procedural horse</title>
   <style>
     html, body { margin: 0; height: 100%; background: #9ecfee; overflow: hidden; font-family: ui-monospace, SFMono-Regular, Menlo, monospace }
@@ -231,7 +232,7 @@
         pine2: std('#3a7040', 0.9),
         rock: std('#8d8d94', 0.95),
         hill: std('#5d7f52', 1.0),
-        cloud: std('#ffffff', 1.0, { metalness: 0 }),
+        cloud: std('#fff3e2', 1.0, { metalness: 0 }),
         bird: new THREE.MeshBasicMaterial({ color: '#2a2f38' })
       }
     }
@@ -283,29 +284,35 @@
       neckLow.position.set(0.72, 0.22, 0)
       neckLow.rotation.z = -1.25
       chest.add(neckLow)
-      const neckLowMesh = taper(0.13, 0.2, 0.55, mats.coat, 21)
+      const neckLowMesh = taper(0.14, 0.22, 0.42, mats.coat, 21)
       neckLow.add(neckLowMesh)
-      const crest = taper(0.035, 0.06, 0.5, mats.mane, 22, 5)
-      crest.position.set(-0.13, 0.05, 0)
+      const crest = taper(0.035, 0.06, 0.38, mats.mane, 22, 5)
+      crest.position.set(-0.12, 0.03, 0)
       crest.rotation.z = 0.12
       neckLow.add(crest)
+      // throatlatch wedge: blends the neck underside into the chest
+      const throat = new THREE.Mesh(jitterVertices(new THREE.BoxGeometry(0.3, 0.2, 0.24), 0.02, 24), mats.coatDark)
+      throat.position.set(0.08, -0.02, 0)
+      throat.rotation.z = -0.45
+      throat.castShadow = true
+      neckLow.add(throat)
 
       const neckUp = new THREE.Group()
-      neckUp.position.set(0, 0.55, 0)
+      neckUp.position.set(0, 0.42, 0)
       neckUp.rotation.z = 0.15
       neckLow.add(neckUp)
-      const neckUpMesh = taper(0.11, 0.15, 0.5, mats.coat, 23)
+      const neckUpMesh = taper(0.115, 0.15, 0.36, mats.coat, 23)
       neckUp.add(neckUpMesh)
       for (let i = 0; i < 4; i++) {
         const tuft = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.12 - i * 0.012, 0.045), mats.mane)
-        tuft.position.set(-0.11, 0.06 + i * 0.13, 0)
+        tuft.position.set(-0.11, 0.05 + i * 0.1, 0)
         tuft.rotation.z = 0.9
         tuft.castShadow = true
         neckUp.add(tuft)
       }
 
       const head = new THREE.Group()
-      head.position.set(0, 0.5, 0)
+      head.position.set(0, 0.36, 0)
       head.rotation.z = 0.92
       neckUp.add(head)
       const cranium = new THREE.Mesh(jitterVertices(new THREE.BoxGeometry(0.26, 0.24, 0.2, 2, 1, 1), 0.02, 31), mats.coat)
@@ -521,9 +528,10 @@
       const trees = new THREE.Group()
       for (let i = 0; i < 18; i++) {
         const a = rng() * Math.PI * 2
-        const r = i < 5 ? 4 + rng() * 6 : 22 + rng() * 26
+        const r = i < 5 ? 1.5 + rng() * 3 : 22 + rng() * 26
         const x = Math.cos(a) * r, z = Math.sin(a) * r
         if (trackDist(x, z) < TRACK_W + 1.5) continue
+        if (Math.hypot(x - 2, z + 3) < 5.5) continue
         const t = new THREE.Group()
         const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.2, 1.2, 5), mats.trunk)
         trunk.position.y = 0.6
@@ -723,7 +731,15 @@
         scene.add(b)
         flies.push({ g: b, wl: wl2, wr: wr2, cx: (rng() - 0.5) * 60, cz: (rng() - 0.5) * 60, r: 1 + rng() * 2.5, sp: 0.5 + rng() * 0.7, ph: rng() * 6.28 })
       }
-      return { clouds, birds, flies }
+      // sunlit pollen motes drifting over the meadow (1 draw call)
+      const POLLEN = 70
+      const pollen = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.03, 0), new THREE.MeshBasicMaterial({ color: '#ffedb8', transparent: true, opacity: 0.5, depthWrite: false }), POLLEN)
+      const pseeds = []
+      for (let i = 0; i < POLLEN; i++) {
+        pseeds.push({ x: (rng() - 0.5) * 70, y: 0.3 + rng() * 2.4, z: (rng() - 0.5) * 70, ph: rng() * 6.28, sp: 0.2 + rng() * 0.4 })
+      }
+      scene.add(pollen)
+      return { clouds, birds, flies, pollen: { mesh: pollen, seeds: pseeds } }
     }
 
     // ── sky dome (gradient) + lighting ────────────────────────────────
@@ -731,14 +747,25 @@
       const skyGeo = new THREE.SphereGeometry(160, 16, 12)
       const skyMat = new THREE.ShaderMaterial({
         side: THREE.BackSide, depthWrite: false, fog: false,
-        uniforms: { top: { value: new THREE.Color('#3f8fd1') }, mid: { value: new THREE.Color('#9ed4ef') }, bot: { value: new THREE.Color('#e8f3e2') } },
+        uniforms: { top: { value: new THREE.Color('#2f6fc0') }, mid: { value: new THREE.Color('#a8d8f0') }, bot: { value: new THREE.Color('#f2e6cf') }, sunDir: { value: new THREE.Vector3(34, 11, 9).normalize() } },
         vertexShader: 'varying vec3 vP; void main() { vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-        fragmentShader: 'varying vec3 vP; uniform vec3 top; uniform vec3 mid; uniform vec3 bot;\n' +
+        fragmentShader: 'varying vec3 vP; uniform vec3 top; uniform vec3 mid; uniform vec3 bot; uniform vec3 sunDir;\n' +
           'void main() { float h = normalize(vP).y; vec3 c = h > 0.12 ? mix(mid, top, smoothstep(0.12, 0.65, h)) : mix(bot, mid, smoothstep(-0.08, 0.12, h));\n' +
+          ' float s = pow(max(dot(normalize(vP), sunDir), 0.0), 10.0);\n' +
+          ' c += vec3(1.0, 0.5, 0.22) * s * 0.5;\n' +
           ' gl_FragColor = vec4(c, 1.0); }'
       })
       scene.add(new THREE.Mesh(skyGeo, skyMat))
-      scene.fog = new THREE.Fog('#cfe0d8', 45, 140)
+      // visible sun disc + halo, aligned with the directional light
+      const sunDir = new THREE.Vector3(34, 11, 9).normalize()
+      const disc = new THREE.Mesh(new THREE.CircleGeometry(5, 24), new THREE.MeshBasicMaterial({ color: '#fff3d6', fog: false }))
+      disc.position.copy(sunDir).multiplyScalar(150)
+      disc.lookAt(0, 0, 0)
+      const halo = new THREE.Mesh(new THREE.CircleGeometry(11, 24), new THREE.MeshBasicMaterial({ color: '#ffcf9a', transparent: true, opacity: 0.35, fog: false, depthWrite: false }))
+      halo.position.copy(sunDir).multiplyScalar(149)
+      halo.lookAt(0, 0, 0)
+      scene.add(disc, halo)
+      scene.fog = new THREE.Fog('#dcdcc2', 45, 140)
     }
     function setupLighting (scene, renderer) {
       const pmrem = new THREE.PMREMGenerator(renderer)
@@ -747,8 +774,8 @@
       scene.environmentIntensity = 0.42
       pmrem.dispose()
       env.traverse((o) => o.geometry?.dispose())
-      const sun = new THREE.DirectionalLight('#ffdfb0', 2.2)
-      sun.position.set(30, 19, 12)
+      const sun = new THREE.DirectionalLight('#ffc182', 2.35)
+      sun.position.set(34, 11, 9)
       sun.castShadow = true
       sun.shadow.mapSize.set(2048, 2048)
       sun.shadow.radius = 5
@@ -814,6 +841,7 @@
       }
 
       const camTarget = new THREE.Vector3(TRACK_R, 1.6, 0)
+      const pDummy = new THREE.Object3D()
       const horsePos = new THREE.Vector3()
       const horseTan = new THREE.Vector3()
 
@@ -882,7 +910,8 @@
         H.root.rotation.z = Math.sin(s * 2 + 0.4) * 0.008
 
         // neck (lags body) + head nod + ear flicks (3s harmonic keeps loop seamless)
-        H.neckLow.rotation.z = -1.25 + Math.sin(s + 2.3) * 0.08 * amp
+        // head/neck lowest at lead-front touchdown, highest through suspension
+        H.neckLow.rotation.z = -1.571 + Math.sin(s + 0.94) * 0.085 * amp
         H.neckLow.rotation.y = Math.sin(s + 1.4) * 0.03
         H.neckUp.rotation.z = 0.15 + Math.sin(s * 2 + 0.9) * 0.04 * amp
         H.head.rotation.z = 0.92 + Math.sin(s + 0.6) * 0.1 * amp
@@ -937,6 +966,17 @@
           f.wl.rotation.y = flap2
           f.wr.rotation.y = -flap2
         }
+
+        for (let i = 0; i < env.pollen.seeds.length; i++) {
+          const q = env.pollen.seeds[i]
+          const px = ((((q.x + elapsed * 0.25) % 70) + 70) % 70) - 35
+          pDummy.position.set(px, q.y + Math.sin(elapsed * 0.8 + q.ph) * 0.3, q.z + Math.cos(elapsed * q.sp + q.ph) * 1.2)
+          pDummy.rotation.set(0, 0, 0)
+          pDummy.scale.setScalar(0.7 + 0.5 * Math.sin(elapsed * 2 + q.ph))
+          pDummy.updateMatrix()
+          env.pollen.mesh.setMatrixAt(i, pDummy.matrix)
+        }
+        env.pollen.mesh.instanceMatrix.needsUpdate = true
 
         // follow camera target tracks the horse
         if (state.follow) {
